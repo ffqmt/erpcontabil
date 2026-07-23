@@ -61,11 +61,13 @@ const CREDIT_ELIGIBLE_TAX_TYPES: TaxType[] = ['ICMS', 'IPI']
 
 interface AutoLineDraft {
   fiscal_document_id: string
-  source_type: 'FISCAL_DOCUMENT' | 'FISCAL_ITEM'
+  source_type: 'FISCAL_DOCUMENT' | 'FISCAL_ITEM' | 'RETENTION'
   source_id: string
-  line_type: 'DEBIT' | 'CREDIT'
+  line_type: 'DEBIT' | 'CREDIT' | 'RETENTION'
   description: string
   amount: number
+  base_amount?: number | string | null
+  tax_rate?: number | string | null
 }
 
 interface TaxAssessmentGeneratedLine {
@@ -158,10 +160,17 @@ async function getReadyDocumentsForAssessment(db: any, companyId: string, compet
 // entram — ainda não escriturados ou fora da apuração por definição), e a partir da Etapa
 // 35B.1-A, só documentos PRONTOS (ver getReadyDocumentsForAssessment) — readyIds já é esse
 // filtro pré-calculado, então aqui só falta aplicá-lo.
-async function generateAutomaticLines(db: any, companyId: string, competence: string, taxType: TaxType, readyIds: Set<string>): Promise<{ debit: AutoLineDraft[]; credit: AutoLineDraft[] }> {
+async function generateAutomaticLines(
+  db: any,
+  companyId: string,
+  competence: string,
+  taxType: TaxType,
+  readyIds: Set<string>
+): Promise<{ debit: AutoLineDraft[]; credit: AutoLineDraft[]; retention: AutoLineDraft[] }> {
   const debit: AutoLineDraft[] = []
   const credit: AutoLineDraft[] = []
-  if (readyIds.size === 0) return { debit, credit }
+  const retention: AutoLineDraft[] = []
+  if (readyIds.size === 0) return { debit, credit, retention }
 
   const readyIdsArray = Array.from(readyIds)
   const headerField = HEADER_TAX_FIELD[taxType]
@@ -170,10 +179,6 @@ async function generateAutomaticLines(db: any, companyId: string, competence: st
   if (headerField) {
     const { data: outDocs } = await db
       .from('fiscal_documents')
-      // Bug pré-existente corrigido na Etapa 32B: a coluna real é "number", não
-      // "document_number" (que nunca existiu em fiscal_documents) — esta query falhava
-      // silenciosamente com "column does not exist" antes desta correção, quebrando a
-      // geração automática de linhas de apuração para TODOS os tributos.
       .select(`id, number, ${headerField}`)
       .eq('company_id', companyId)
       .eq('competence', competence)
@@ -204,7 +209,6 @@ async function generateAutomaticLines(db: any, companyId: string, competence: st
   }
 
   if (taxType === 'IPI') {
-    // Sem coluna de cabeçalho — agrega por documento a partir de fiscal_document_items.ipi_amount.
     const { data: items } = await db
       .from('fiscal_document_items')
       .select('fiscal_document_id, ipi_amount, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
@@ -234,7 +238,34 @@ async function generateAutomaticLines(db: any, companyId: string, competence: st
     })
   }
 
-  return { debit, credit }
+  // Retenções na fonte (IRRF, INSS_RETIDO, PCC, ISS, etc.) da tabela fiscal_document_retentions
+  const { data: retentionsData } = await db
+    .from('fiscal_document_retentions')
+    .select('id, amount, base_amount, rate, fiscal_document_id, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
+    .eq('tax_type', taxType)
+    .eq('fiscal_documents.company_id', companyId)
+    .eq('fiscal_documents.competence', competence)
+    .eq('fiscal_documents.status', 'BOOKED')
+    .in('fiscal_document_id', readyIdsArray)
+    .gt('amount', 0)
+
+  ;(retentionsData || []).forEach((r: any) => {
+    const amt = Number(r.amount) || 0
+    if (amt <= 0) return
+    const doc = r.fiscal_documents
+    retention.push({
+      fiscal_document_id: r.fiscal_document_id,
+      source_type: 'RETENTION',
+      source_id: r.id,
+      line_type: 'RETENTION',
+      description: `Retenção de ${taxType} — documento ${doc?.number || r.fiscal_document_id}`,
+      base_amount: r.base_amount,
+      tax_rate: r.rate,
+      amount: amt
+    })
+  })
+
+  return { debit, credit, retention }
 }
 
 // Soma as linhas atuais (automáticas recém-geradas + manuais preservadas) e os campos
@@ -575,35 +606,9 @@ export async function calculateTaxAssessmentAction(rawInput: unknown): Promise<A
     // Etapa 35B.1-A: só documentos PRONTOS entram na soma automática — documentos excluídos
     // e o motivo vão para calculation_memory.excludedDocuments (ver getReadyDocumentsForAssessment).
     const readiness = await getReadyDocumentsForAssessment(db, context.companyId, assessment.competence)
-    const { debit, credit } = await generateAutomaticLines(db, context.companyId, assessment.competence, taxType, readiness.readyIds)
+    const { debit, credit, retention } = await generateAutomaticLines(db, context.companyId, assessment.competence, taxType, readiness.readyIds)
 
-    // Retenções na fonte do mesmo tributo, em documentos BOOKED da competência e PRONTOS.
-    const { data: retentions } = readiness.readyIds.size > 0
-      ? await db
-          .from('fiscal_document_retentions')
-          .select('id, amount, base_amount, rate, fiscal_document_id, fiscal_documents!inner(company_id, competence, status, number)')
-          .eq('tax_type', assessment.tax_type)
-          .eq('fiscal_documents.company_id', context.companyId)
-          .eq('fiscal_documents.competence', assessment.competence)
-          .eq('fiscal_documents.status', 'BOOKED')
-          .in('fiscal_document_id', Array.from(readiness.readyIds))
-      : { data: [] }
-
-    const retentionLines: any[] = (retentions || []).map((r: any) => ({
-      workspace_id: context.workspaceId,
-      company_id: context.companyId,
-      tax_assessment_id: id,
-      fiscal_document_id: r.fiscal_document_id,
-      source_type: 'RETENTION',
-      source_id: r.id,
-      line_type: 'RETENTION',
-      description: `Retenção ${assessment.tax_type} — documento ${r.fiscal_documents?.number || r.fiscal_document_id}`,
-      base_amount: r.base_amount,
-      tax_rate: r.rate,
-      amount: Number(r.amount)
-    }))
-
-    const newLines: any[] = [...debit, ...credit].map((l) => ({
+    const newLines: any[] = [...debit, ...credit, ...retention].map((l) => ({
       workspace_id: context.workspaceId,
       company_id: context.companyId,
       tax_assessment_id: id,
@@ -612,8 +617,10 @@ export async function calculateTaxAssessmentAction(rawInput: unknown): Promise<A
       source_id: l.source_id,
       line_type: l.line_type,
       description: l.description,
+      base_amount: l.base_amount || null,
+      tax_rate: l.tax_rate || null,
       amount: l.amount
-    })).concat(retentionLines)
+    }))
 
     if (newLines.length > 0) {
       const { error: linesError } = await db.from('tax_assessment_lines').insert(newLines)
@@ -1413,6 +1420,7 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
     for (const setting of activeSettings) {
       const taxType = setting.tax_type
       const calculationMode = setting.calculation_mode || (['INSS_RETIDO', 'IRRF', 'PCC', 'OTHER'].includes(taxType) ? 'MANUAL' : 'AUTO')
+      const isRetentionType = ['IRRF', 'INSS_RETIDO', 'PCC'].includes(taxType)
 
       const allowedCheck = await assertTaxTypeAllowedForAssessment(db, context.companyId, taxType)
       if (allowedCheck) {
@@ -1460,41 +1468,30 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
           continue
         }
 
-        if (calculationMode === 'AUTO') {
+        if (calculationMode === 'AUTO' || isRetentionType) {
           const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
-          const { debit, credit } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
+          const { debit, credit, retention } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
 
           await db
             .from('tax_assessment_lines')
             .delete()
             .eq('tax_assessment_id', existing.id)
             .eq('company_id', context.companyId)
-            .neq('source_type', 'MANUAL_ADJUSTMENT')
+            .in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM', 'RETENTION'])
 
-          const linesToInsert: TaxAssessmentGeneratedLine[] = [
-            ...debit.map((d) => ({
-              workspace_id: context.workspaceId,
-              company_id: context.companyId,
-              tax_assessment_id: existing.id,
-              fiscal_document_id: d.fiscal_document_id,
-              source_type: d.source_type,
-              source_id: d.source_id,
-              line_type: d.line_type,
-              description: d.description,
-              amount: d.amount
-            })),
-            ...credit.map((c) => ({
-              workspace_id: context.workspaceId,
-              company_id: context.companyId,
-              tax_assessment_id: existing.id,
-              fiscal_document_id: c.fiscal_document_id,
-              source_type: c.source_type,
-              source_id: c.source_id,
-              line_type: c.line_type,
-              description: c.description,
-              amount: c.amount
-            }))
-          ]
+          const linesToInsert: any[] = [...debit, ...credit, ...retention].map((l) => ({
+            workspace_id: context.workspaceId,
+            company_id: context.companyId,
+            tax_assessment_id: existing.id,
+            fiscal_document_id: l.fiscal_document_id,
+            source_type: l.source_type,
+            source_id: l.source_id,
+            line_type: l.line_type,
+            description: l.description,
+            base_amount: l.base_amount || null,
+            tax_rate: l.tax_rate || null,
+            amount: l.amount
+          }))
 
           if (linesToInsert.length > 0) {
             await db.from('tax_assessment_lines').insert(linesToInsert)
@@ -1550,34 +1547,23 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
         continue
       }
 
-      if (calculationMode === 'AUTO') {
+      if (calculationMode === 'AUTO' || isRetentionType) {
         const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
-        const { debit, credit } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
+        const { debit, credit, retention } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
 
-        const linesToInsert: TaxAssessmentGeneratedLine[] = [
-          ...debit.map((d) => ({
-            workspace_id: context.workspaceId,
-            company_id: context.companyId,
-            tax_assessment_id: newAssessment.id,
-            fiscal_document_id: d.fiscal_document_id,
-            source_type: d.source_type,
-            source_id: d.source_id,
-            line_type: d.line_type,
-            description: d.description,
-            amount: d.amount
-          })),
-          ...credit.map((c) => ({
-            workspace_id: context.workspaceId,
-            company_id: context.companyId,
-            tax_assessment_id: newAssessment.id,
-            fiscal_document_id: c.fiscal_document_id,
-            source_type: c.source_type,
-            source_id: c.source_id,
-            line_type: c.line_type,
-            description: c.description,
-            amount: c.amount
-          }))
-        ]
+        const linesToInsert: any[] = [...debit, ...credit, ...retention].map((l) => ({
+          workspace_id: context.workspaceId,
+          company_id: context.companyId,
+          tax_assessment_id: newAssessment.id,
+          fiscal_document_id: l.fiscal_document_id,
+          source_type: l.source_type,
+          source_id: l.source_id,
+          line_type: l.line_type,
+          description: l.description,
+          base_amount: l.base_amount || null,
+          tax_rate: l.tax_rate || null,
+          amount: l.amount
+        }))
 
         if (linesToInsert.length > 0) {
           await db.from('tax_assessment_lines').insert(linesToInsert)
