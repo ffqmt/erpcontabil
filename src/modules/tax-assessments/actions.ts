@@ -6,6 +6,7 @@ import { getClient } from '@/lib/supabase/server'
 import { canManageTaxAssessments, canCloseTaxAssessment, canPostFiscalToAccounting } from '@/lib/permissions/permissions'
 import {
   createTaxAssessmentSchema,
+  createBatchTaxAssessmentSchema,
   taxAssessmentIdSchema,
   adjustTaxAssessmentSchema,
   accountTaxAssessmentSchema,
@@ -1358,3 +1359,264 @@ export async function deleteTaxAssessmentAdjustmentAction(rawInput: unknown): Pr
     return { ok: false, error: error.message || 'Falha de comunicação com o Supabase.', code: 'DATABASE_ERROR' }
   }
 }
+
+export interface BatchAssessmentResultItem {
+  taxType: TaxType
+  calculationMode: 'AUTO' | 'MANUAL'
+  assessmentId?: string
+  status?: string
+  operation: 'created' | 'reused' | 'calculated' | 'manual_created' | 'closed_skipped' | 'cancelled_skipped' | 'error'
+  payableAmount?: number
+  message: string
+}
+
+export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promise<ActionResult<{ items: BatchAssessmentResultItem[] }>> {
+  if (!(await canManageTaxAssessments())) {
+    return { ok: false, error: 'Acesso negado: permissões insuficientes.', code: 'INSUFFICIENT_PERMISSIONS' }
+  }
+
+  const validation = createBatchTaxAssessmentSchema.safeParse(rawInput)
+  if (!validation.success) {
+    return { ok: false, error: 'Erros de validação.', code: 'VALIDATION_ERROR', fieldErrors: validation.error.flatten().fieldErrors }
+  }
+
+  const context = await getCurrentContext()
+  const db = await getDb()
+  const competenceStart = `${validation.data.competence.substring(0, 7)}-01`
+
+  try {
+    const { data: rawSettings, error: settingsError } = await db
+      .from('company_tax_assessment_settings')
+      .select('id, company_id, tax_type, enabled, account_assessment, calculation_mode, notes')
+      .eq('company_id', context.companyId)
+      .eq('enabled', true)
+      .order('tax_type', { ascending: true })
+
+    if (settingsError) throw settingsError
+
+    const activeSettings = (rawSettings || []) as {
+      tax_type: TaxType
+      enabled: boolean
+      calculation_mode: 'AUTO' | 'MANUAL'
+    }[]
+
+    if (activeSettings.length === 0) {
+      return {
+        ok: false,
+        error: 'Nenhum tributo está habilitado para apuração nesta empresa. Configure em Fiscal > Configurações Tributárias.',
+        code: 'NO_ENABLED_TAX_TYPES'
+      }
+    }
+
+    const items: BatchAssessmentResultItem[] = []
+
+    for (const setting of activeSettings) {
+      const taxType = setting.tax_type
+      const calculationMode = setting.calculation_mode || (['INSS_RETIDO', 'IRRF', 'PCC', 'OTHER'].includes(taxType) ? 'MANUAL' : 'AUTO')
+
+      const allowedCheck = await assertTaxTypeAllowedForAssessment(db, context.companyId, taxType)
+      if (allowedCheck) {
+        items.push({
+          taxType,
+          calculationMode,
+          operation: 'error',
+          message: allowedCheck.error
+        })
+        continue
+      }
+
+      const { data: existing } = await db
+        .from('tax_assessments')
+        .select('id, status, payable_amount')
+        .eq('company_id', context.companyId)
+        .eq('competence', competenceStart)
+        .eq('tax_type', taxType)
+        .maybeSingle()
+
+      if (existing) {
+        if (existing.status === 'CLOSED') {
+          items.push({
+            taxType,
+            calculationMode,
+            assessmentId: existing.id,
+            status: existing.status,
+            operation: 'closed_skipped',
+            payableAmount: Number(existing.payable_amount || 0),
+            message: `Apuração de ${taxType} já encerrada em competência anterior — mantida sem alterações.`
+          })
+          continue
+        }
+
+        if (existing.status === 'CANCELLED') {
+          items.push({
+            taxType,
+            calculationMode,
+            assessmentId: existing.id,
+            status: existing.status,
+            operation: 'cancelled_skipped',
+            payableAmount: 0,
+            message: `Apuração de ${taxType} cancelada — mantida sem alterações.`
+          })
+          continue
+        }
+
+        if (calculationMode === 'AUTO') {
+          const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
+          const { debit, credit } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
+
+          await db
+            .from('tax_assessment_lines')
+            .delete()
+            .eq('tax_assessment_id', existing.id)
+            .eq('company_id', context.companyId)
+            .neq('source_type', 'MANUAL_ADJUSTMENT')
+
+          const linesToInsert: TaxAssessmentGeneratedLine[] = [
+            ...debit.map((d) => ({
+              workspace_id: context.workspaceId,
+              company_id: context.companyId,
+              tax_assessment_id: existing.id,
+              fiscal_document_id: d.fiscal_document_id,
+              source_type: d.source_type,
+              source_id: d.source_id,
+              line_type: d.line_type,
+              description: d.description,
+              amount: d.amount
+            })),
+            ...credit.map((c) => ({
+              workspace_id: context.workspaceId,
+              company_id: context.companyId,
+              tax_assessment_id: existing.id,
+              fiscal_document_id: c.fiscal_document_id,
+              source_type: c.source_type,
+              source_id: c.source_id,
+              line_type: c.line_type,
+              description: c.description,
+              amount: c.amount
+            }))
+          ]
+
+          if (linesToInsert.length > 0) {
+            await db.from('tax_assessment_lines').insert(linesToInsert)
+          }
+
+          const totals = await recomputeAssessmentTotals(db, existing.id, context.companyId)
+          await syncFiscalDocumentTaxStatus(db, context.companyId, linesToInsert.map((l) => l.fiscal_document_id).filter(Boolean) as string[])
+
+          items.push({
+            taxType,
+            calculationMode,
+            assessmentId: existing.id,
+            status: 'CALCULATED',
+            operation: 'calculated',
+            payableAmount: totals.payableAmount,
+            message: `Apuração de ${taxType} recalculada — R$ ${totals.payableAmount.toFixed(2)}.`
+          })
+        } else {
+          const totals = await recomputeAssessmentTotals(db, existing.id, context.companyId)
+          items.push({
+            taxType,
+            calculationMode,
+            assessmentId: existing.id,
+            status: existing.status,
+            operation: 'reused',
+            payableAmount: totals.payableAmount,
+            message: `Apuração de ${taxType} (Manual) mantida — R$ ${totals.payableAmount.toFixed(2)}.`
+          })
+        }
+        continue
+      }
+
+      const { data: newAssessment, error: createError } = await db
+        .from('tax_assessments')
+        .insert({
+          workspace_id: context.workspaceId,
+          company_id: context.companyId,
+          tax_type: taxType,
+          competence: competenceStart,
+          due_date: validation.data.dueDate || null,
+          status: 'DRAFT'
+        })
+        .select('id')
+        .single()
+
+      if (createError || !newAssessment) {
+        items.push({
+          taxType,
+          calculationMode,
+          operation: 'error',
+          message: `Falha ao criar registro de apuração para ${taxType}.`
+        })
+        continue
+      }
+
+      if (calculationMode === 'AUTO') {
+        const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
+        const { debit, credit } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
+
+        const linesToInsert: TaxAssessmentGeneratedLine[] = [
+          ...debit.map((d) => ({
+            workspace_id: context.workspaceId,
+            company_id: context.companyId,
+            tax_assessment_id: newAssessment.id,
+            fiscal_document_id: d.fiscal_document_id,
+            source_type: d.source_type,
+            source_id: d.source_id,
+            line_type: d.line_type,
+            description: d.description,
+            amount: d.amount
+          })),
+          ...credit.map((c) => ({
+            workspace_id: context.workspaceId,
+            company_id: context.companyId,
+            tax_assessment_id: newAssessment.id,
+            fiscal_document_id: c.fiscal_document_id,
+            source_type: c.source_type,
+            source_id: c.source_id,
+            line_type: c.line_type,
+            description: c.description,
+            amount: c.amount
+          }))
+        ]
+
+        if (linesToInsert.length > 0) {
+          await db.from('tax_assessment_lines').insert(linesToInsert)
+        }
+
+        const totals = await recomputeAssessmentTotals(db, newAssessment.id, context.companyId)
+        await syncFiscalDocumentTaxStatus(db, context.companyId, linesToInsert.map((l) => l.fiscal_document_id).filter(Boolean) as string[])
+
+        items.push({
+          taxType,
+          calculationMode,
+          assessmentId: newAssessment.id,
+          status: 'CALCULATED',
+          operation: 'created',
+          payableAmount: totals.payableAmount,
+          message: `Apuração de ${taxType} criada e calculada — R$ ${totals.payableAmount.toFixed(2)}.`
+        })
+      } else {
+        items.push({
+          taxType,
+          calculationMode,
+          assessmentId: newAssessment.id,
+          status: 'DRAFT',
+          operation: 'manual_created',
+          payableAmount: 0,
+          message: `Apuração de ${taxType} (Manual) criada — aguarda lançamento de linhas.`
+        })
+      }
+    }
+
+    revalidateAssessments()
+    return {
+      ok: true,
+      data: { items },
+      message: `Processamento em lote da competência ${validation.data.competence.substring(0, 7)} concluído com sucesso.`
+    }
+  } catch (error: any) {
+    console.error('Erro na apuração fiscal em lote por competência:', error)
+    return { ok: false, error: error.message || 'Falha ao processar apurações em lote.', code: 'DATABASE_ERROR' }
+  }
+}
+

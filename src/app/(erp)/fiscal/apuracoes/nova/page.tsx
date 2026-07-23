@@ -166,8 +166,13 @@ export default async function NewTaxAssessmentPage() {
           <p className="text-sm text-gray-500">Escolha o tributo e a competência — os documentos escriturados serão consolidados automaticamente.</p>
         </div>
       </div>
-      <TaxAssessmentForm defaultCompetence={context.competence} taxOptions={taxOptions} />
+      <TaxAssessmentForm
+        defaultCompetence={context.competence}
+        taxOptions={taxOptions}
+        assessmentSettings={assessmentSettings}
+      />
     </div>
   )
 }
+
 

@@ -71,9 +71,16 @@ export const deleteTaxAssessmentAdjustmentSchema = z.object({
   assessmentId: z.string().guid('ID de apuração inválido.')
 })
 
+export const createBatchTaxAssessmentSchema = z.object({
+  competence: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/, 'Informe a competência no formato AAAA-MM.'),
+  dueDate: z.string().optional().or(z.literal(''))
+})
+
 export type CreateTaxAssessmentInput = z.infer<typeof createTaxAssessmentSchema>
+export type CreateBatchTaxAssessmentInput = z.infer<typeof createBatchTaxAssessmentSchema>
 export type AdjustTaxAssessmentInput = z.infer<typeof adjustTaxAssessmentSchema>
 export type AccountTaxAssessmentInput = z.infer<typeof accountTaxAssessmentSchema>
 export type AddTaxAssessmentManualLineInput = z.infer<typeof addTaxAssessmentManualLineSchema>
 export type UpdateTaxAssessmentManualLineInput = z.infer<typeof updateTaxAssessmentManualLineSchema>
 export type UpdateTaxAssessmentPreviousBalanceInput = z.infer<typeof updateTaxAssessmentPreviousBalanceSchema>
+
