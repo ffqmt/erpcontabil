@@ -18,7 +18,7 @@ import {
   addTaxAssessmentAdjustmentSchema,
   deleteTaxAssessmentAdjustmentSchema
 } from './validations'
-import { EDITABLE_ASSESSMENT_STATUSES } from './utils'
+import { EDITABLE_ASSESSMENT_STATUSES, normalizeCompetenceDate } from './utils'
 import { TaxType } from './types'
 import { findEffectiveTaxRegimeRate } from './regime-rates/queries'
 import { getDefaultEnabledTaxTypes, isAssessableTaxType, isDocumentAccountedTaxType } from './settings/options'
@@ -110,11 +110,12 @@ export interface ExcludedAssessmentDocument {
  * registrar (calculation_memory), em vez de excluir silenciosamente.
  */
 async function getReadyDocumentsForAssessment(db: any, companyId: string, competence: string): Promise<{ readyIds: Set<string>; excluded: ExcludedAssessmentDocument[] }> {
+  const compDate = normalizeCompetenceDate(competence)
   const { data: docs, error } = await db
     .from('fiscal_documents')
     .select('id, number, fiscal_operation_nature_id, fiscal_operation_nature:fiscal_operation_natures(enters_tax_assessment)')
     .eq('company_id', companyId)
-    .eq('competence', competence)
+    .eq('competence', compDate)
     .eq('status', 'BOOKED')
     .neq('tax_status', 'IGNORED')
   if (error) throw error
@@ -137,7 +138,7 @@ async function getReadyDocumentsForAssessment(db: any, companyId: string, compet
 
   if (natureOkIds.length === 0) return { readyIds: new Set(), excluded }
 
-  const pendencies = await listFiscalPendencies(companyId, { competence })
+  const pendencies = await listFiscalPendencies(companyId, { competence: compDate })
   const criticalOpenIds = new Set(pendencies.filter((p) => p.status === 'OPEN' && p.severity === 'CRITICAL').map((p) => p.fiscalDocumentId))
 
   const readyIds = new Set<string>()
@@ -153,13 +154,6 @@ async function getReadyDocumentsForAssessment(db: any, companyId: string, compet
   return { readyIds, excluded }
 }
 
-// Débitos: documentos de SAÍDA (venda/serviço prestado) — o tributo destacado é devido pela
-// própria empresa. Créditos: documentos de ENTRADA (compra/serviço tomado) — o tributo
-// destacado dá direito a crédito (só para os tipos em CREDIT_ELIGIBLE_TAX_TYPES). Em ambos
-// os casos: só documentos BOOKED da competência exata (DRAFT/VALIDATED/CANCELLED nunca
-// entram — ainda não escriturados ou fora da apuração por definição), e a partir da Etapa
-// 35B.1-A, só documentos PRONTOS (ver getReadyDocumentsForAssessment) — readyIds já é esse
-// filtro pré-calculado, então aqui só falta aplicá-lo.
 async function generateAutomaticLines(
   db: any,
   companyId: string,
@@ -170,90 +164,93 @@ async function generateAutomaticLines(
   const debit: AutoLineDraft[] = []
   const credit: AutoLineDraft[] = []
   const retention: AutoLineDraft[] = []
-  if (readyIds.size === 0) return { debit, credit, retention }
+  const compDate = normalizeCompetenceDate(competence)
+  const normTaxType = (taxType || '').toUpperCase() as TaxType
 
-  const readyIdsArray = Array.from(readyIds)
-  const headerField = HEADER_TAX_FIELD[taxType]
-  const creditEligible = CREDIT_ELIGIBLE_TAX_TYPES.includes(taxType)
+  // 1. Débitos e Créditos operacionais (ISS, ICMS, IPI) — dependem de readyIds (documentos com Natureza Fiscal definida e sem pendência crítica)
+  if (readyIds.size > 0) {
+    const readyIdsArray = Array.from(readyIds)
+    const headerField = HEADER_TAX_FIELD[normTaxType]
+    const creditEligible = CREDIT_ELIGIBLE_TAX_TYPES.includes(normTaxType)
 
-  if (headerField) {
-    const { data: outDocs } = await db
-      .from('fiscal_documents')
-      .select(`id, number, ${headerField}`)
-      .eq('company_id', companyId)
-      .eq('competence', competence)
-      .eq('status', 'BOOKED')
-      .eq('direction', 'OUT')
-      .in('id', readyIdsArray)
-      .gt(headerField, 0)
-    ;(outDocs || []).forEach((d: any) => {
-      const amt = Number(d[headerField])
-      if (amt > 0) debit.push({ fiscal_document_id: d.id, source_type: 'FISCAL_DOCUMENT', source_id: d.id, line_type: 'DEBIT', description: `${taxType} — documento ${d.number || d.id}`, amount: amt })
-    })
-
-    if (creditEligible) {
-      const { data: inDocs } = await db
+    if (headerField) {
+      const { data: outDocs } = await db
         .from('fiscal_documents')
         .select(`id, number, ${headerField}`)
         .eq('company_id', companyId)
-        .eq('competence', competence)
+        .eq('competence', compDate)
         .eq('status', 'BOOKED')
-        .eq('direction', 'IN')
+        .eq('direction', 'OUT')
         .in('id', readyIdsArray)
         .gt(headerField, 0)
-      ;(inDocs || []).forEach((d: any) => {
+      ;(outDocs || []).forEach((d: any) => {
         const amt = Number(d[headerField])
-        if (amt > 0) credit.push({ fiscal_document_id: d.id, source_type: 'FISCAL_DOCUMENT', source_id: d.id, line_type: 'CREDIT', description: `Crédito de ${taxType} — documento ${d.number || d.id}`, amount: amt })
+        if (amt > 0) debit.push({ fiscal_document_id: d.id, source_type: 'FISCAL_DOCUMENT', source_id: d.id, line_type: 'DEBIT', description: `${normTaxType} — documento ${d.number || d.id}`, amount: amt })
+      })
+
+      if (creditEligible) {
+        const { data: inDocs } = await db
+          .from('fiscal_documents')
+          .select(`id, number, ${headerField}`)
+          .eq('company_id', companyId)
+          .eq('competence', compDate)
+          .eq('status', 'BOOKED')
+          .eq('direction', 'IN')
+          .in('id', readyIdsArray)
+          .gt(headerField, 0)
+        ;(inDocs || []).forEach((d: any) => {
+          const amt = Number(d[headerField])
+          if (amt > 0) credit.push({ fiscal_document_id: d.id, source_type: 'FISCAL_DOCUMENT', source_id: d.id, line_type: 'CREDIT', description: `Crédito de ${normTaxType} — documento ${d.number || d.id}`, amount: amt })
+        })
+      }
+    }
+
+    if (normTaxType === 'IPI') {
+      const { data: items } = await db
+        .from('fiscal_document_items')
+        .select('fiscal_document_id, ipi_amount, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
+        .eq('fiscal_documents.company_id', companyId)
+        .eq('fiscal_documents.competence', compDate)
+        .eq('fiscal_documents.status', 'BOOKED')
+        .in('fiscal_document_id', readyIdsArray)
+        .not('ipi_amount', 'is', null)
+
+      const byDocument = new Map<string, { documentNumber: string | null; direction: string; total: number }>()
+      ;(items || []).forEach((it: any) => {
+        const amt = Number(it.ipi_amount) || 0
+        if (amt <= 0) return
+        const doc = it.fiscal_documents
+        const key = it.fiscal_document_id
+        const entry = byDocument.get(key) || { documentNumber: doc?.number || null, direction: doc?.direction, total: 0 }
+        entry.total += amt
+        byDocument.set(key, entry)
+      })
+
+      byDocument.forEach((entry, fiscalDocumentId) => {
+        if (entry.direction === 'OUT') {
+          debit.push({ fiscal_document_id: fiscalDocumentId, source_type: 'FISCAL_DOCUMENT', source_id: fiscalDocumentId, line_type: 'DEBIT', description: `IPI — documento ${entry.documentNumber || fiscalDocumentId}`, amount: entry.total })
+        } else if (entry.direction === 'IN') {
+          credit.push({ fiscal_document_id: fiscalDocumentId, source_type: 'FISCAL_ITEM', source_id: fiscalDocumentId, line_type: 'CREDIT', description: `Crédito de IPI — documento ${entry.documentNumber || fiscalDocumentId}`, amount: entry.total })
+        }
       })
     }
   }
 
-  if (taxType === 'IPI') {
-    const { data: items } = await db
-      .from('fiscal_document_items')
-      .select('fiscal_document_id, ipi_amount, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
-      .eq('fiscal_documents.company_id', companyId)
-      .eq('fiscal_documents.competence', competence)
-      .eq('fiscal_documents.status', 'BOOKED')
-      .in('fiscal_document_id', readyIdsArray)
-      .not('ipi_amount', 'is', null)
-
-    const byDocument = new Map<string, { documentNumber: string | null; direction: string; total: number }>()
-    ;(items || []).forEach((it: any) => {
-      const amt = Number(it.ipi_amount) || 0
-      if (amt <= 0) return
-      const doc = it.fiscal_documents
-      const key = it.fiscal_document_id
-      const entry = byDocument.get(key) || { documentNumber: doc?.number || null, direction: doc?.direction, total: 0 }
-      entry.total += amt
-      byDocument.set(key, entry)
-    })
-
-    byDocument.forEach((entry, fiscalDocumentId) => {
-      if (entry.direction === 'OUT') {
-        debit.push({ fiscal_document_id: fiscalDocumentId, source_type: 'FISCAL_DOCUMENT', source_id: fiscalDocumentId, line_type: 'DEBIT', description: `IPI — documento ${entry.documentNumber || fiscalDocumentId}`, amount: entry.total })
-      } else if (entry.direction === 'IN') {
-        credit.push({ fiscal_document_id: fiscalDocumentId, source_type: 'FISCAL_ITEM', source_id: fiscalDocumentId, line_type: 'CREDIT', description: `Crédito de IPI — documento ${entry.documentNumber || fiscalDocumentId}`, amount: entry.total })
-      }
-    })
-  }
-
-  // Retenções na fonte (IRRF, INSS_RETIDO, PCC, ISS, etc.) da tabela fiscal_document_retentions.
-  // Documentos escriturados (status = BOOKED) da empresa na competência são elegíveis para retenção,
-  // mesmo que não possuam fiscal_operation_nature_id definida ou tax_status = NOT_ASSESSED.
+  // 2. Retenções na fonte (IRRF, INSS_RETIDO, PCC, ISS, etc.) da tabela fiscal_document_retentions.
+  // Executado SEMPRE para documentos escriturados (status = BOOKED) da empresa na competência normalizada.
   const { data: retentionsData, error: retErr } = await db
     .from('fiscal_document_retentions')
     .select('id, amount, base_amount, rate, fiscal_document_id, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
-    .eq('tax_type', taxType)
+    .eq('tax_type', normTaxType)
     .eq('fiscal_documents.company_id', companyId)
-    .eq('fiscal_documents.competence', competence)
+    .eq('fiscal_documents.competence', compDate)
     .eq('fiscal_documents.status', 'BOOKED')
     .gt('amount', 0)
 
   if (retErr) {
-    console.error(`[generateAutomaticLines-retention-error] taxType=${taxType}, competence=${competence}:`, retErr)
+    console.error(`[generateAutomaticLines-retention-error] taxType=${normTaxType}, compDate=${compDate}:`, retErr)
   } else if (process.env.NODE_ENV !== 'production') {
-    console.log(`[generateAutomaticLines] taxType=${taxType}, competence=${competence}, retentionsFound=${retentionsData?.length || 0}`)
+    console.log(`[generateAutomaticLines] taxType=${normTaxType}, compDate=${compDate}, retentionsFound=${retentionsData?.length || 0}`, retentionsData)
   }
 
   ;(retentionsData || []).forEach((r: any) => {
@@ -265,7 +262,7 @@ async function generateAutomaticLines(
       source_type: 'RETENTION',
       source_id: r.id,
       line_type: 'RETENTION',
-      description: `Retenção de ${taxType} — documento ${doc?.number || r.fiscal_document_id}`,
+      description: `Retenção de ${normTaxType} — documento ${doc?.number || r.fiscal_document_id}`,
       base_amount: r.base_amount,
       tax_rate: r.rate,
       amount: amt
@@ -1501,7 +1498,11 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
           }))
 
           if (linesToInsert.length > 0) {
-            await db.from('tax_assessment_lines').insert(linesToInsert)
+            const { error: insertErr } = await db.from('tax_assessment_lines').insert(linesToInsert)
+            if (insertErr) {
+              console.error('[batchCreateTaxAssessmentsAction-insert-error]', insertErr, linesToInsert)
+              throw insertErr
+            }
           }
 
           const totals = await recomputeAssessmentTotals(db, existing.id, context.companyId)
@@ -1573,7 +1574,11 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
         }))
 
         if (linesToInsert.length > 0) {
-          await db.from('tax_assessment_lines').insert(linesToInsert)
+          const { error: insertErr } = await db.from('tax_assessment_lines').insert(linesToInsert)
+          if (insertErr) {
+            console.error('[batchCreateTaxAssessmentsAction-new-insert-error]', insertErr, linesToInsert)
+            throw insertErr
+          }
         }
 
         const totals = await recomputeAssessmentTotals(db, newAssessment.id, context.companyId)

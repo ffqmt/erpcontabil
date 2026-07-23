@@ -17,3 +17,16 @@ export function formatCompetenceBR(dateStr: string | null | undefined): string {
   const idx = parseInt(parts[1], 10) - 1
   return `${months[idx] || parts[1]}/${parts[0]}`
 }
+
+export function normalizeCompetenceDate(input: string | null | undefined): string {
+  if (!input) return ''
+  const trimmed = input.trim()
+  if (/^\d{4}-\d{2}$/.test(trimmed)) {
+    return `${trimmed}-01`
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return `${trimmed.substring(0, 7)}-01`
+  }
+  return trimmed
+}
+
