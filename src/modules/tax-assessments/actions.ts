@@ -19,7 +19,8 @@ import {
   deleteTaxAssessmentAdjustmentSchema
 } from './validations'
 import { EDITABLE_ASSESSMENT_STATUSES, normalizeCompetenceDate } from './utils'
-import { TaxType } from './types'
+import { classifyTaxAssessmentLine } from './services/fiscal-classifier'
+import { TaxType, TaxAssessmentLineType, TaxAssessmentLineSourceType } from './types'
 import { findEffectiveTaxRegimeRate } from './regime-rates/queries'
 import { getDefaultEnabledTaxTypes, isAssessableTaxType, isDocumentAccountedTaxType } from './settings/options'
 import { getDreRawData } from '@/modules/accounting/dre/queries'
@@ -61,9 +62,9 @@ const CREDIT_ELIGIBLE_TAX_TYPES: TaxType[] = ['ICMS', 'IPI']
 
 interface AutoLineDraft {
   fiscal_document_id: string
-  source_type: 'FISCAL_DOCUMENT' | 'FISCAL_ITEM' | 'RETENTION'
+  source_type: TaxAssessmentLineSourceType
   source_id: string
-  line_type: 'DEBIT' | 'CREDIT' | 'RETENTION'
+  line_type: TaxAssessmentLineType
   description: string
   amount: number
   base_amount?: number | string | null
@@ -257,30 +258,38 @@ async function generateAutomaticLines(
     const amt = Number(r.amount) || 0
     if (amt <= 0) return
     const doc = r.fiscal_documents
-    const isIncomingDoc = doc?.direction === 'IN'
 
-    if (isIncomingDoc) {
-      debit.push({
-        fiscal_document_id: r.fiscal_document_id,
-        source_type: 'RETENTION',
-        source_id: r.id,
-        line_type: 'DEBIT',
-        description: `${normTaxType} retido de fornecedor — documento ${doc?.number || r.fiscal_document_id}`,
-        base_amount: r.base_amount,
-        tax_rate: r.rate,
-        amount: amt
-      })
-    } else {
-      retention.push({
-        fiscal_document_id: r.fiscal_document_id,
-        source_type: 'RETENTION',
-        source_id: r.id,
-        line_type: 'RETENTION',
-        description: `${normTaxType} retido na fonte por cliente — documento ${doc?.number || r.fiscal_document_id}`,
-        base_amount: r.base_amount,
-        tax_rate: r.rate,
-        amount: amt
-      })
+    const classification = classifyTaxAssessmentLine({
+      taxType: normTaxType,
+      documentDirection: (doc?.direction === 'IN' ? 'IN' : 'OUT'),
+      sourceType: 'RETENTION',
+      amount: amt,
+      documentNumber: doc?.number,
+      fiscalDocumentId: r.fiscal_document_id,
+      sourceId: r.id,
+      baseAmount: r.base_amount,
+      taxRate: r.rate
+    })
+
+    if (!classification.shouldInclude) return
+
+    const lineDraft: AutoLineDraft = {
+      fiscal_document_id: r.fiscal_document_id,
+      source_type: classification.sourceType,
+      source_id: r.id,
+      line_type: classification.lineType,
+      description: classification.description,
+      base_amount: classification.baseAmount,
+      tax_rate: classification.taxRate,
+      amount: classification.amount
+    }
+
+    if (classification.lineType === 'DEBIT') {
+      debit.push(lineDraft)
+    } else if (classification.lineType === 'CREDIT') {
+      credit.push(lineDraft)
+    } else if (classification.lineType === 'RETENTION') {
+      retention.push(lineDraft)
     }
   })
 
