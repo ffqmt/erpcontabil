@@ -1,0 +1,174 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Este ERP ainda não tem tema escuro implementado nos componentes (nenhuma classe
+   `dark:` existe no projeto) — todas as telas foram construídas assumindo fundo
+   claro. Manter --foreground preso ao prefers-color-scheme do sistema operacional
+   fazia o texto de inputs/selects (que não definem cor própria, só herdam do body)
+   ficar quase branco sobre fundo branco em qualquer SO com modo escuro ativado.
+   Por isso o valor é fixo aqui, independente da preferência do SO, até que um tema
+   escuro real seja implementado componente a componente. */
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), sans-serif;
+}
+
+/* Rede de segurança global: garante texto legível e borda visível em campos de
+   formulário mesmo em componentes que não definem cor de texto explicitamente. */
+input,
+select,
+textarea {
+  color: #0f172a; /* slate-900 */
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #64748b; /* slate-500 */
+  opacity: 1;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  color: #475569; /* slate-600 */
+  opacity: 0.7;
+}
+
+select option {
+  color: #0f172a;
+  background: #ffffff;
+}
+
+/* Regras de Impressão Profissional (CSS Print-friendly) */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm 12mm 10mm 12mm;
+  }
+  
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 9px !important;
+    font-family: var(--font-mono), monospace !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  
+  body {
+    counter-reset: page;
+  }
+
+  .page-number-counter::after {
+    content: counter(page, decimal-leading-zero);
+  }
+  
+  /* Garante ocultação de itens com a classe utilitária print:hidden */
+  .print\:hidden,
+  button,
+  nav,
+  header,
+  aside,
+  .scrollbar-thin,
+  [role="status"] {
+    display: none !important;
+  }
+  
+  /* Reset dos containers principais */
+  .min-h-screen,
+  .min-h-full,
+  .flex-1,
+  main {
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  main {
+    margin-left: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    background: #ffffff !important;
+  }
+  
+  /* Reset de rolagem e overflow em wrappers de tabelas */
+  .overflow-x-auto,
+  .overflow-y-auto {
+    overflow: visible !important;
+    overflow-x: visible !important;
+    overflow-y: visible !important;
+    scrollbar-width: none !important;
+  }
+
+  ::-webkit-scrollbar {
+    display: none !important;
+  }
+
+  /* Prevenção de quebra de linhas no meio de blocos, cartões e tabelas */
+  tr, p, .page-break-avoid, .report-footer-signatures {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+  
+  /* Repete cabeçalho de tabela em páginas subsequentes */
+  thead {
+    display: table-header-group !important;
+  }
+  
+  tfoot {
+    display: table-footer-group !important;
+  }
+  
+  /* Desativa cores de fundo pesadas e sombras */
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
+  /* Preserva coloração de textos de destaque contábeis (vermelho de despesa, verde de lucro) */
+  .text-red-700, .text-red-750, .text-red-800 {
+    color: #b91c1c !important;
+  }
+  .text-green-700, .text-green-800, .text-green-900 {
+    color: #15803d !important;
+  }
+  
+  /* Formatação de tabelas */
+  table {
+    width: 100% !important;
+    max-width: 100% !important;
+    table-layout: fixed !important;
+    border-collapse: collapse !important;
+  }
+  
+  th, td {
+    padding: 3px 4px !important;
+    font-size: 9px !important;
+    line-height: 1.2 !important;
+    font-family: var(--font-mono), monospace !important;
+    word-break: break-all !important;
+  }
+}
+

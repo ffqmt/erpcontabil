@@ -1,0 +1,52 @@
+-- =====================================================================================
+-- ERP CONTÁBIL — ORDEM DE EXECUÇÃO MANUAL DO BANCO DE DADOS E RLS
+-- =====================================================================================
+--
+-- ⚠️ IMPORTANTE: O Supabase SQL Editor NÃO ACEITA comandos do tipo "\i <nome_do_arquivo>".
+-- O comando "\i" é um recurso exclusivo do cliente de terminal "psql".
+--
+-- Para executar este roteiro no Supabase SQL Editor:
+--   1. Abra o arquivo correspondente na sua IDE.
+--   2. Copie todo o seu conteúdo.
+--   3. Cole no editor SQL do Supabase.
+--   4. Clique em "Run".
+--
+-- Repita o processo para cada arquivo, seguindo rigorosamente a ordem abaixo.
+--
+-- =====================================================================================
+-- ETAPA 1: CRIAÇÃO DO SCHEMA (ESTRUTURA DAS TABELAS)
+-- =====================================================================================
+-- Executar estes arquivos na ordem exata:
+--
+-- 1. erp_schema_v1_1.sql (raiz do workspace)
+-- 2. db/migrations/erp_schema_v1_2_cadastros_base.sql
+-- 3. db/migrations/erp_schema_v1_3_bank_reconciliation_mvp.sql
+-- 4. db/migrations/erp_schema_v1_4_fiscal_tax_assets.sql
+-- 5. db/migrations/erp_schema_v1_5_tax_credits.sql
+--
+-- =====================================================================================
+-- ETAPA 2: APLICAÇÃO DAS POLÍTICAS DE RLS (SEGURANÇA)
+-- =====================================================================================
+-- Executar estes arquivos na ordem exata:
+--
+-- 6. erp_rls_v1.sql (raiz do workspace)
+-- 7. db/migrations/erp_rls_v1_2_cadastros_base.sql
+-- 8. db/migrations/erp_rls_v1_4_fiscal_tax_assets.sql
+--
+-- =====================================================================================
+-- ETAPA 3: EXECUÇÃO DA SUÍTE DE TESTES RLS (ISOLAMENTO MULTIEMPRESA)
+-- =====================================================================================
+-- Executar em uma aba limpa:
+--
+-- 9. db/tests/rls_isolation_tests.sql
+--
+-- =====================================================================================
+-- ETAPA OPCIONAL: SEEDS DEMO CONTÁBIL (PARA APLICAÇÃO WEB DEV)
+-- =====================================================================================
+-- Se você quiser popular o banco descartável para testar a aplicação Next.js:
+--
+-- a) db/seed/seed_demo_accounting.sql
+-- b) db/seed/seed_demo_base_registrations.sql
+-- c) db/seed/seed_demo_banking.sql
+-- d) db/seed/seed_demo_fiscal_tax_assets.sql
+--

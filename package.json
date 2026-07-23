@@ -1,0 +1,37 @@
+{
+  "name": "sela-sistem",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "supabase:link": "node scripts/supabase-cli.js link --project-ref zugaruaawybwlvnsntkc --yes",
+    "db:migrations:new": "node scripts/supabase-cli.js migration new",
+    "db:migrations:list": "node scripts/supabase-cli.js migration list --linked",
+    "db:migrations:dry-run": "node scripts/supabase-cli.js db push --linked --dry-run --yes",
+    "db:migrations:push": "node scripts/supabase-cli.js db push --linked --yes"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.12.0",
+    "@supabase/supabase-js": "^2.110.2",
+    "fast-xml-parser": "^5.10.0",
+    "lucide-react": "^1.24.0",
+    "next": "16.2.10",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "supabase": "^2.109.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
