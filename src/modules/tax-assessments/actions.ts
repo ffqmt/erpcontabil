@@ -238,16 +238,23 @@ async function generateAutomaticLines(
     })
   }
 
-  // Retenções na fonte (IRRF, INSS_RETIDO, PCC, ISS, etc.) da tabela fiscal_document_retentions
-  const { data: retentionsData } = await db
+  // Retenções na fonte (IRRF, INSS_RETIDO, PCC, ISS, etc.) da tabela fiscal_document_retentions.
+  // Documentos escriturados (status = BOOKED) da empresa na competência são elegíveis para retenção,
+  // mesmo que não possuam fiscal_operation_nature_id definida ou tax_status = NOT_ASSESSED.
+  const { data: retentionsData, error: retErr } = await db
     .from('fiscal_document_retentions')
     .select('id, amount, base_amount, rate, fiscal_document_id, fiscal_documents!inner(id, number, direction, status, competence, company_id)')
     .eq('tax_type', taxType)
     .eq('fiscal_documents.company_id', companyId)
     .eq('fiscal_documents.competence', competence)
     .eq('fiscal_documents.status', 'BOOKED')
-    .in('fiscal_document_id', readyIdsArray)
     .gt('amount', 0)
+
+  if (retErr) {
+    console.error(`[generateAutomaticLines-retention-error] taxType=${taxType}, competence=${competence}:`, retErr)
+  } else if (process.env.NODE_ENV !== 'production') {
+    console.log(`[generateAutomaticLines] taxType=${taxType}, competence=${competence}, retentionsFound=${retentionsData?.length || 0}`)
+  }
 
   ;(retentionsData || []).forEach((r: any) => {
     const amt = Number(r.amount) || 0
@@ -1605,4 +1612,9 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
     return { ok: false, error: error.message || 'Falha ao processar apurações em lote.', code: 'DATABASE_ERROR' }
   }
 }
+
+export async function recalculateTaxAssessmentCompetenceAction(rawInput: unknown): Promise<ActionResult<{ items: BatchAssessmentResultItem[] }>> {
+  return batchCreateTaxAssessmentsAction(rawInput)
+}
+
 

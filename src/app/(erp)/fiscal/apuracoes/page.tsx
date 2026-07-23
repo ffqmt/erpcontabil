@@ -43,7 +43,7 @@ export default async function TaxAssessmentsPage() {
           <p className="text-sm">{errorMsg}</p>
         </div>
       ) : (
-        <TaxAssessmentList assessments={assessments} />
+        <TaxAssessmentList assessments={assessments} defaultCompetence={context.competence} />
       )}
     </div>
   )
