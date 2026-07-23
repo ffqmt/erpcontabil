@@ -257,16 +257,31 @@ async function generateAutomaticLines(
     const amt = Number(r.amount) || 0
     if (amt <= 0) return
     const doc = r.fiscal_documents
-    retention.push({
-      fiscal_document_id: r.fiscal_document_id,
-      source_type: 'RETENTION',
-      source_id: r.id,
-      line_type: 'RETENTION',
-      description: `Retenção de ${normTaxType} — documento ${doc?.number || r.fiscal_document_id}`,
-      base_amount: r.base_amount,
-      tax_rate: r.rate,
-      amount: amt
-    })
+    const isIncomingDoc = doc?.direction === 'IN'
+
+    if (isIncomingDoc) {
+      debit.push({
+        fiscal_document_id: r.fiscal_document_id,
+        source_type: 'RETENTION',
+        source_id: r.id,
+        line_type: 'DEBIT',
+        description: `${normTaxType} retido de fornecedor — documento ${doc?.number || r.fiscal_document_id}`,
+        base_amount: r.base_amount,
+        tax_rate: r.rate,
+        amount: amt
+      })
+    } else {
+      retention.push({
+        fiscal_document_id: r.fiscal_document_id,
+        source_type: 'RETENTION',
+        source_id: r.id,
+        line_type: 'RETENTION',
+        description: `${normTaxType} retido na fonte por cliente — documento ${doc?.number || r.fiscal_document_id}`,
+        base_amount: r.base_amount,
+        tax_rate: r.rate,
+        amount: amt
+      })
+    }
   })
 
   return { debit, credit, retention }
