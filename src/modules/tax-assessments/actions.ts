@@ -296,6 +296,26 @@ async function generateAutomaticLines(
   return { debit, credit, retention }
 }
 
+/**
+ * Exclui todas as linhas automáticas registradas para a apuração informada.
+ * Preserva 100% das linhas manuais (source_type = 'MANUAL_ADJUSTMENT') e saldo anterior (source_type = 'PREVIOUS_BALANCE').
+ * Lança exceção se o banco/Supabase retornar erro para garantir idempotência do recálculo.
+ */
+async function clearAutomaticLinesForAssessment(db: any, assessmentId: string, companyId: string) {
+  const { error } = await db
+    .from('tax_assessment_lines')
+    .delete()
+    .eq('tax_assessment_id', assessmentId)
+    .eq('company_id', companyId)
+    .neq('source_type', 'MANUAL_ADJUSTMENT')
+    .neq('source_type', 'PREVIOUS_BALANCE')
+
+  if (error) {
+    console.error(`[clearAutomaticLinesForAssessment-error] assessmentId=${assessmentId}:`, error)
+    throw error
+  }
+}
+
 // Soma as linhas atuais (automáticas recém-geradas + manuais preservadas) e os campos
 // diretos (multa/juros/saldo anterior) e grava os totais + payable_amount/next_balance_amount
 // na apuração. Fórmula corrigida na Etapa 24 (achado B1): saldo credor anterior agora É
@@ -568,7 +588,7 @@ export async function calculateTaxAssessmentAction(rawInput: unknown): Promise<A
         return { ok: false, error: 'Simples Nacional só pode ser apurado para empresa nesse regime tributário.', code: 'INVALID_REGIME' }
       }
 
-      await db.from('tax_assessment_lines').delete().eq('tax_assessment_id', id).eq('company_id', context.companyId).in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM', 'RETENTION'])
+      await clearAutomaticLinesForAssessment(db, id, context.companyId)
 
       const { start, end } = monthRangeForCompetence(assessment.competence)
       const revenueByNature = await sumRevenueByNature(db, context.companyId, start, end)
@@ -629,7 +649,7 @@ export async function calculateTaxAssessmentAction(rawInput: unknown): Promise<A
     // Limpa só as linhas geradas automaticamente na última execução — preserva 100% das
     // linhas manuais (source_type='MANUAL_ADJUSTMENT': créditos/débitos/retenções/ajustes
     // lançados à mão continuam intactos após recalcular).
-    await db.from('tax_assessment_lines').delete().eq('tax_assessment_id', id).eq('company_id', context.companyId).in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM', 'RETENTION'])
+    await clearAutomaticLinesForAssessment(db, id, context.companyId)
 
     // Etapa 35B.1-A: só documentos PRONTOS entram na soma automática — documentos excluídos
     // e o motivo vão para calculation_memory.excludedDocuments (ver getReadyDocumentsForAssessment).
@@ -1192,7 +1212,7 @@ export async function calculateIncomeTaxAssessmentAction(rawInput: unknown): Pro
       }
     }
 
-    await db.from('tax_assessment_lines').delete().eq('tax_assessment_id', id).eq('company_id', context.companyId).in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM'])
+    await clearAutomaticLinesForAssessment(db, id, context.companyId)
 
     const { start, end, monthsInQuarter } = quarterRangeForCompetence(assessment.competence)
     const newLines: any[] = []
@@ -1500,12 +1520,7 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
           const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
           const { debit, credit, retention } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
 
-          await db
-            .from('tax_assessment_lines')
-            .delete()
-            .eq('tax_assessment_id', existing.id)
-            .eq('company_id', context.companyId)
-            .in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM', 'RETENTION'])
+          await clearAutomaticLinesForAssessment(db, existing.id, context.companyId)
 
           const linesToInsert: any[] = [...debit, ...credit, ...retention].map((l) => ({
             workspace_id: context.workspaceId,
