@@ -299,20 +299,35 @@ async function generateAutomaticLines(
 /**
  * Exclui todas as linhas automáticas registradas para a apuração informada.
  * Preserva 100% das linhas manuais (source_type = 'MANUAL_ADJUSTMENT') e saldo anterior (source_type = 'PREVIOUS_BALANCE').
- * Lança exceção se o banco/Supabase retornar erro para garantir idempotência do recálculo.
+ * Se o comando de exclusão falhar no Supabase, lança exceção para interromper o recálculo e não duplicar linhas.
  */
 async function clearAutomaticLinesForAssessment(db: any, assessmentId: string, companyId: string) {
-  const { error } = await db
+  if (!assessmentId || !companyId) return
+
+  // 1. Exclui linhas automáticas por origens reconhecidas (FISCAL_DOCUMENT, FISCAL_ITEM, RETENTION)
+  const { error: err1 } = await db
     .from('tax_assessment_lines')
     .delete()
     .eq('tax_assessment_id', assessmentId)
     .eq('company_id', companyId)
-    .neq('source_type', 'MANUAL_ADJUSTMENT')
-    .neq('source_type', 'PREVIOUS_BALANCE')
+    .in('source_type', ['FISCAL_DOCUMENT', 'FISCAL_ITEM', 'RETENTION'])
 
-  if (error) {
-    console.error(`[clearAutomaticLinesForAssessment-error] assessmentId=${assessmentId}:`, error)
-    throw error
+  if (err1) {
+    console.error(`[clearAutomaticLinesForAssessment-error-1] assessmentId=${assessmentId}:`, err1)
+    throw err1
+  }
+
+  // 2. Exclui linhas automáticas legadas com source_type nulo (se houver)
+  const { error: err2 } = await db
+    .from('tax_assessment_lines')
+    .delete()
+    .eq('tax_assessment_id', assessmentId)
+    .eq('company_id', companyId)
+    .is('source_type', null)
+
+  if (err2) {
+    console.error(`[clearAutomaticLinesForAssessment-error-2] assessmentId=${assessmentId}:`, err2)
+    throw err2
   }
 }
 
@@ -1517,10 +1532,9 @@ export async function batchCreateTaxAssessmentsAction(rawInput: unknown): Promis
         }
 
         if (calculationMode === 'AUTO' || isRetentionType) {
+          await clearAutomaticLinesForAssessment(db, existing.id, context.companyId)
           const { readyIds } = await getReadyDocumentsForAssessment(db, context.companyId, competenceStart)
           const { debit, credit, retention } = await generateAutomaticLines(db, context.companyId, competenceStart, taxType, readyIds)
-
-          await clearAutomaticLinesForAssessment(db, existing.id, context.companyId)
 
           const linesToInsert: any[] = [...debit, ...credit, ...retention].map((l) => ({
             workspace_id: context.workspaceId,
